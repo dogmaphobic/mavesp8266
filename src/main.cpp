@@ -34,6 +34,7 @@
  *
  * @author Gus Grubba <mavlink@grubba.com>
  */
+#include <Arduino.h>
 
 #include "mavesp8266.h"
 #include "mavesp8266_parameters.h"
@@ -41,10 +42,11 @@
 #include "mavesp8266_vehicle.h"
 #include "mavesp8266_httpd.h"
 #include "mavesp8266_component.h"
-
-#include <ESP8266mDNS.h>
-
-#define GPIO02  2
+#ifdef ESP32
+    #include <ESPmDNS.h>
+#else
+    #include <ESP8266mDNS.h>
+#endif
 
 //---------------------------------------------------------------------------------
 //-- HTTP Update Status
@@ -106,11 +108,18 @@ MavESP8266World* getWorld()
 //-- Wait for a DHCPD client
 void wait_for_client() {
     DEBUG_LOG("Waiting for a client...\n");
+    uint8_t state = LED_OFF;
 #ifdef ENABLE_DEBUG
     int wcount = 0;
 #endif
-    uint8 client_count = wifi_softap_get_station_num();
+#ifdef ESP32  
+    uint8_t client_count = WiFi.softAPgetStationNum();
+#else
+    uint8_t client_count = wifi_softap_get_station_num();
+#endif
     while (!client_count) {
+        state = (state == LED_ON) ? LED_OFF : LED_ON;
+        SET_STATUS_LED(state);
 #ifdef ENABLE_DEBUG
         Serial1.print(".");
         if(++wcount > 80) {
@@ -119,43 +128,67 @@ void wait_for_client() {
         }
 #endif
         delay(1000);
+#ifdef ESP32
+        client_count = WiFi.softAPgetStationNum();
+#else
         client_count = wifi_softap_get_station_num();
+#endif
     }
+    SET_STATUS_LED(LED_OFF);
     DEBUG_LOG("Got %d client(s)\n", client_count);
 }
 
 //---------------------------------------------------------------------------------
 //-- Reset all parameters whenever the reset gpio pin is active
 void reset_interrupt(){
+    DEBUG_LOG("Reset to factory\n");
     Parameters.resetToDefaults();
     Parameters.saveAllToEeprom();
+#ifndef ESP32
     ESP.reset();
+#else
+    delay(200); // to be sure of the Eeprom end to write 
+    ESP.restart();
+#endif
 }
 
 //---------------------------------------------------------------------------------
 //-- Set things up
 void setup() {
+#ifdef ESP32
+    //downgrade CPU speed to reduce power consumption
+    setCpuFrequencyMhz(160);  
+#endif
     delay(1000);
     Parameters.begin();
 #ifdef ENABLE_DEBUG
+    #ifndef ESP32
+        Serial1.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY, GPIO2);
+    #else
+        Serial1.begin(115200, SERIAL_8N1, UART_DEBUG_RX, UART_DEBUG_TX);
+    #endif
+#else
+#ifndef PW_LINK
     //   We only use it for non debug because GPIO02 is used as a serial
     //   pin (TX) when debugging.
-    Serial1.begin(115200);
-#else
-    //-- Initialized GPIO02 (Used for "Reset To Factory")
-    pinMode(GPIO02, INPUT_PULLUP);
-    attachInterrupt(GPIO02, reset_interrupt, FALLING);
+    //-- Initialized "Reset To Factory
+    pinMode(RESTORE_BTN, INPUT_PULLUP);
+    attachInterrupt(RESTORE_BTN, reset_interrupt, FALLING);
 #endif
+#endif
+    DEBUG_LOG("\nStart...\n");
+    pinMode(STATUS_LED, OUTPUT); //Used for status
+    SET_STATUS_LED(LED_OFF);
     Logger.begin(2048);
-
-    DEBUG_LOG("\nConfiguring access point...\n");
     DEBUG_LOG("Free Sketch Space: %u\n", ESP.getFreeSketchSpace());
 
     WiFi.disconnect(true);
-
     if(Parameters.getWifiMode() == WIFI_MODE_STA){
+        DEBUG_LOG("\nConfiguring Wifi Station...\n");
         //-- Connect to an existing network
+#ifndef ESP32
         WiFi.mode(WIFI_STA);
+#endif
         WiFi.config(Parameters.getWifiStaIP(), Parameters.getWifiStaGateway(), Parameters.getWifiStaSubnet(), 0U, 0U);
         WiFi.begin(Parameters.getWifiStaSsid(), Parameters.getWifiStaPassword());
 
@@ -177,21 +210,33 @@ void setup() {
     }
 
     if(Parameters.getWifiMode() == WIFI_MODE_AP){
+        DEBUG_LOG("\nConfiguring access point...\n");
         //-- Start AP
+#ifndef ESP32
         WiFi.mode(WIFI_AP);
         WiFi.encryptionType(AUTH_WPA2_PSK);
+#else
+        WiFi.encryptionType(WIFI_AUTH_WPA2_PSK);
+#endif
         WiFi.softAP(Parameters.getWifiSsid(), Parameters.getWifiPassword(), Parameters.getWifiChannel());
         localIP = WiFi.softAPIP();
         wait_for_client();
     }
 
     //-- Boost power to Max
+#ifndef ESP32
     WiFi.setOutputPower(20.5);
+#else
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
+#endif
     //-- MDNS
-    char mdsnName[256];
-    sprintf(mdsnName, "MavEsp8266-%d",localIP[3]);
-    MDNS.begin(mdsnName);
-    MDNS.addService("http", "tcp", 80);
+    DEBUG_LOG("Start mDNS...\n");
+    if(MDNS.begin(DNSNAME)){
+        MDNS.addService("http", "tcp", 80);
+        DEBUG_LOG("http://%s.local exposed...\n",DNSNAME);
+    }else{
+        DEBUG_LOG("Url : %s.local NOT exposed (Error)...\n", DNSNAME);
+    }
     //-- Initialize Comm Links
     DEBUG_LOG("Start WiFi Bridge\n");
     DEBUG_LOG("Local IP: %s\n", localIP.toString().c_str());

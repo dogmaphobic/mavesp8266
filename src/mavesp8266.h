@@ -38,18 +38,36 @@
 #ifndef MAVESP8266_H
 #define MAVESP8266_H
 
-#include <ESP8266WiFi.h>
+#ifndef ESP32
+    #include <ESP8266WiFi.h>
+#else
+    #include <ESPmDNS.h>
+    #include <WiFi.h>
+    #include <WebServer.h>
+
+    extern "C" {
+        #include "esp32-hal-cpu.h" //for CPU Frequence change with setCpuFrequencyMhz()
+    } 
+#endif
 #include <WiFiClient.h>
 #include <WiFiUdp.h>
 
 #undef F
+#ifndef ESP32
+    #pragma GCC diagnostic push 
+    #pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+#endif
 #include <ardupilotmega/mavlink.h>
+#ifndef ESP32
+    #pragma GCC diagnostic pop
+#endif
 
+#ifdef ARDUINO_ESP8266_ESP12
  extern "C" {
     // Espressif SDK
     #include "user_interface.h"
 }
-
+#endif
 class MavESP8266Parameters;
 class MavESP8266Component;
 class MavESP8266Vehicle;
